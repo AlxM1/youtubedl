@@ -6,7 +6,7 @@ let deferredInstallPrompt = null;
 
 // --- Service Worker Registration ---
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+  navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
 }
 
 // --- PWA Install Prompt ---

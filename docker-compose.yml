@@ -5,9 +5,10 @@ services:
       - "8000:8000"
     volumes:
       - ./downloads:/app/downloads
-      - ./data.db:/app/data.db
+      - vidgrab_data:/app/data
     environment:
       - DOWNLOAD_DIR=/app/downloads
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/vidgrab.db
       - MAX_CONCURRENT_DOWNLOADS=3
       # Required: set a strong API key to protect the instance
       # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
@@ -22,3 +23,6 @@ services:
       # Optional: path to cookies.txt for auth-required content
       # - COOKIES_FILE=/app/cookies.txt
     restart: unless-stopped
+
+volumes:
+  vidgrab_data:

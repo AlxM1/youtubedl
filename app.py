@@ -78,7 +78,8 @@ app = FastAPI(title="Video Downloader", lifespan=lifespan)
 async def auth_middleware(request: Request, call_next):
     # Skip auth for static files and the root page
     path = request.url.path
-    if not config.API_KEY or path == "/" or path.startswith("/static"):
+    public_paths = ("/", "/sw.js", "/api/health")
+    if not config.API_KEY or path in public_paths or path.startswith("/static"):
         return await call_next(request)
 
     # Check header or query param
@@ -91,6 +92,17 @@ async def auth_middleware(request: Request, call_next):
 
 # --- Pydantic models ---
 
+def _is_private_ip(hostname: str) -> bool:
+    """Check if a hostname looks like a private/local IP address."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(hostname)
+        return addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local
+    except ValueError:
+        # Not an IP address — check hostname strings
+        return hostname in ("localhost",)
+
+
 def _validate_url(url: str) -> str:
     url = url.strip()
     if not url:
@@ -102,8 +114,7 @@ def _validate_url(url: str) -> str:
         raise ValueError("Invalid URL: no hostname")
     # Block local/private addresses
     hostname = parsed.hostname.lower()
-    blocked = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]")
-    if hostname in blocked or hostname.startswith("192.168.") or hostname.startswith("10.") or hostname.startswith("172."):
+    if _is_private_ip(hostname):
         raise ValueError("Local/private URLs are not allowed")
     return url
 
@@ -266,6 +277,16 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return (STATIC_DIR / "index.html").read_text()
+
+
+@app.get("/sw.js")
+async def service_worker():
+    """Serve service worker from root scope (required for PWA)."""
+    return FileResponse(
+        STATIC_DIR / "sw.js",
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"},
+    )
 
 
 if __name__ == "__main__":
