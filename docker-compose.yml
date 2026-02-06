@@ -1,0 +1,14 @@
+services:
+  downloader:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./data.db:/app/data.db
+    environment:
+      - DOWNLOAD_DIR=/app/downloads
+      - MAX_CONCURRENT_DOWNLOADS=3
+      # Optional: path to cookies.txt inside container for auth-required content
+      # - COOKIES_FILE=/app/cookies.txt
+    restart: unless-stopped

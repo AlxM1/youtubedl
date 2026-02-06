@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Downloader</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Video Downloader</h1>
+      <p class="subtitle">YouTube &middot; X/Twitter &middot; Instagram &middot; TikTok &middot; Facebook</p>
+    </header>
+
+    <!-- URL Input -->
+    <section class="card" id="input-section">
+      <div class="url-row">
+        <input type="text" id="url-input" placeholder="Paste video URL here..." autocomplete="off" />
+        <button id="fetch-btn" onclick="fetchFormats()">Fetch</button>
+      </div>
+      <div id="fetch-error" class="error-msg hidden"></div>
+      <div id="fetch-spinner" class="spinner hidden"></div>
+    </section>
+
+    <!-- Format Selector (shown after fetch) -->
+    <section class="card hidden" id="format-section">
+      <div class="video-preview">
+        <img id="preview-thumb" src="" alt="" />
+        <div class="preview-info">
+          <h3 id="preview-title"></h3>
+          <span id="preview-platform" class="badge"></span>
+          <span id="preview-duration"></span>
+          <span id="preview-uploader"></span>
+        </div>
+      </div>
+
+      <div class="format-controls">
+        <div class="format-group">
+          <label>Format</label>
+          <select id="format-select"></select>
+        </div>
+        <button id="download-btn" onclick="startDownload()">Download</button>
+      </div>
+
+      <div class="quick-picks">
+        <button class="chip" onclick="quickPick('best')">Best Quality (MP4)</button>
+        <button class="chip" onclick="quickPick('best_audio')">Audio Only</button>
+      </div>
+    </section>
+
+    <!-- Downloads Queue & History -->
+    <section class="card">
+      <div class="section-header">
+        <h2>Downloads</h2>
+        <button class="btn-sm" onclick="refreshDownloads()">Refresh</button>
+      </div>
+      <div id="downloads-list">
+        <p class="empty-state">No downloads yet. Paste a URL above to get started.</p>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

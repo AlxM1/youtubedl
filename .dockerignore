@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+.git
+downloads/
+data.db
+*.md
+.env
