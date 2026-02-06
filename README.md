@@ -8,10 +8,11 @@ A private, self-hosted web platform for downloading video content from YouTube, 
 - **Format selector** — Browse all available formats (resolution, codec, bitrate, file size) and pick exactly what you want
 - **Quick picks** — One-click "Best Quality MP4" and "Audio Only" presets
 - **Download queue** — Concurrent downloads with live progress tracking
+- **Retry failed downloads** — One-click retry from the UI
 - **Download history** — SQLite-backed history with metadata, thumbnails, and file management
 - **File serving** — Download completed files directly from the web UI
-- **Docker ready** — Single command deployment
-- **Private** — No tracking, no accounts, runs entirely on your machine
+- **Docker ready** — Single command deployment with health checks
+- **Private & secure** — API key auth, URL validation, rate limiting, path traversal protection, non-root container
 
 ## Quick Start
 
@@ -51,40 +52,65 @@ All settings via environment variables:
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Parallel download limit |
 | `PORT` | `8000` | Web server port |
 | `HOST` | `0.0.0.0` | Bind address |
+| `API_KEY` | (empty) | API key for authentication. Empty = no auth (local-only use) |
+| `EXTRACT_RATE_LIMIT` | `10` | Max format-extract requests per IP per minute |
+| `MIN_FREE_DISK_MB` | `500` | Minimum free disk space (MB) before refusing downloads |
 | `COOKIES_FILE` | (empty) | Path to `cookies.txt` for authenticated content |
 | `DATABASE_URL` | `sqlite+aiosqlite:///data.db` | Database connection string |
 
+### Authentication
+
+Set the `API_KEY` environment variable to protect your instance. Generate a key:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+The frontend will prompt for the key on first use and store it in localStorage. All API requests require the key via `X-API-Key` header or `?api_key=` query param. Static assets and the root page are always accessible.
+
 ### Cookie Authentication
 
-Some content requires authentication (private Instagram posts, age-restricted YouTube videos, etc.). Export your browser cookies to a `cookies.txt` file and set the `COOKIES_FILE` environment variable:
+Some content requires platform authentication (private Instagram posts, age-restricted YouTube videos, etc.). Export your browser cookies to a `cookies.txt` file and set the `COOKIES_FILE` environment variable:
 
 ```bash
 COOKIES_FILE=./cookies.txt python app.py
 ```
 
+## Security
+
+- **API key authentication** — optional but strongly recommended for any non-localhost deployment
+- **URL validation** — only HTTP/HTTPS URLs accepted; local/private IPs blocked (SSRF protection)
+- **Rate limiting** — per-IP rate limiting on the expensive format-extraction endpoint
+- **Path traversal protection** — file downloads validated against the download directory
+- **Non-root container** — Docker runs as `appuser`, not root
+- **Disk space guard** — refuses new downloads when disk is nearly full
+- **Stale recovery** — downloads stuck mid-progress are marked as failed on server restart
+
 ## Architecture
 
 ```
-app.py              — FastAPI application, API endpoints, static file serving
-downloader.py       — yt-dlp integration, format extraction, download manager
+app.py              — FastAPI application, API endpoints, auth, rate limiting, static serving
+downloader.py       — yt-dlp integration, format extraction, download manager, retry logic
 database.py         — SQLAlchemy async models and session management
 config.py           — Configuration from environment variables
 static/
   index.html        — Single-page web UI
   style.css         — Dark theme styles
-  app.js            — Frontend logic (fetch, format selector, queue, polling)
+  app.js            — Frontend logic (auth, format selector, queue, polling, retry)
 ```
 
 ### API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/extract` | Extract video info and available formats |
-| `POST` | `/api/download` | Start a download with selected format |
+| `POST` | `/api/extract` | Extract video info and available formats (rate limited) |
+| `POST` | `/api/download` | Start a download with selected format (disk space checked) |
 | `GET` | `/api/downloads` | List all downloads with status/progress |
 | `GET` | `/api/downloads/:id/progress` | Live progress for an active download |
+| `POST` | `/api/downloads/:id/retry` | Retry a failed download |
 | `GET` | `/api/downloads/:id/file` | Serve a completed file |
 | `DELETE` | `/api/downloads/:id` | Cancel/delete a download and its file |
+| `GET` | `/api/health` | Health check (disk space, active downloads) |
 
 ## Platform Notes
 
@@ -96,9 +122,37 @@ static/
 | TikTok | Standard URLs work; watermark-free downloads available |
 | Facebook | Public video URLs work; private content needs login cookies |
 
+## Production Deployment
+
+For exposing beyond localhost:
+
+1. **Set `API_KEY`** — generate and set a strong key
+2. **Use a reverse proxy** — put nginx/Caddy in front for HTTPS termination
+3. **Bind to localhost** — set `HOST=127.0.0.1` and let the reverse proxy handle external traffic
+4. **Monitor health** — poll `/api/health` or rely on Docker's built-in HEALTHCHECK
+
+Example nginx config:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name dl.example.com;
+
+    ssl_certificate     /etc/ssl/certs/cert.pem;
+    ssl_certificate_key /etc/ssl/private/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 0;
+    }
+}
+```
+
 ## Tech Stack
 
 - **Backend:** Python, FastAPI, yt-dlp, SQLAlchemy (async), aiosqlite
 - **Frontend:** Vanilla HTML/CSS/JS (no build step)
 - **Storage:** SQLite + local filesystem
-- **Containerization:** Docker
+- **Containerization:** Docker with health checks

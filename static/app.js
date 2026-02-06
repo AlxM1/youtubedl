@@ -1,6 +1,28 @@
 // State
 let currentVideoInfo = null;
 let pollTimer = null;
+let apiKey = localStorage.getItem("apiKey") || "";
+
+// --- API helper ---
+async function api(method, path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+
+  const resp = await fetch(path, opts);
+  if (resp.status === 401) {
+    const key = prompt("API key required. Enter your API key:");
+    if (key) {
+      apiKey = key;
+      localStorage.setItem("apiKey", key);
+      return api(method, path, body);
+    }
+    throw new Error("Authentication required");
+  }
+  return resp;
+}
 
 // --- Fetch formats ---
 async function fetchFormats() {
@@ -19,11 +41,7 @@ async function fetchFormats() {
   formatSection.classList.add("hidden");
 
   try {
-    const resp = await fetch("/api/extract", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
+    const resp = await api("POST", "/api/extract", { url });
 
     if (!resp.ok) {
       const data = await resp.json();
@@ -129,14 +147,10 @@ async function startDownload() {
   btn.disabled = true;
 
   try {
-    const resp = await fetch("/api/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: currentVideoInfo.url,
-        format_id: formatId,
-        format_note: note,
-      }),
+    const resp = await api("POST", "/api/download", {
+      url: currentVideoInfo.url,
+      format_id: formatId,
+      format_note: note,
     });
 
     if (!resp.ok) {
@@ -162,7 +176,7 @@ async function startDownload() {
 // --- Downloads list ---
 async function refreshDownloads() {
   try {
-    const resp = await fetch("/api/downloads");
+    const resp = await api("GET", "/api/downloads");
     const downloads = await resp.json();
     renderDownloads(downloads);
 
@@ -200,8 +214,11 @@ function renderDownloads(downloads) {
       const progress = dl.progress || 0;
 
       let metaParts = [];
-      if (dl.platform) metaParts.push(`<span class="badge ${dl.platform}">${dl.platform}</span>`);
-      if (dl.format_note) metaParts.push(dl.format_note);
+      if (dl.platform)
+        metaParts.push(
+          `<span class="badge ${escapeHtml(dl.platform)}">${escapeHtml(dl.platform)}</span>`
+        );
+      if (dl.format_note) metaParts.push(escapeHtml(dl.format_note));
       if (dl.filesize) metaParts.push(formatBytes(dl.filesize));
       if (dl.duration) metaParts.push(formatDuration(dl.duration));
       if (dl.speed) metaParts.push(formatBytes(dl.speed) + "/s");
@@ -211,17 +228,22 @@ function renderDownloads(downloads) {
       if (dl.status === "downloading" || dl.status === "pending") {
         progressHtml = `
           <div class="dl-progress">
-            <div class="dl-progress-bar" style="width: ${progress}%"></div>
+            <div class="dl-progress-bar" style="width: ${Math.min(progress, 100)}%"></div>
           </div>`;
       }
 
       let actionsHtml = "";
       if (dl.status === "completed") {
+        const fileUrl = apiKey
+          ? `/api/downloads/${dl.id}/file?api_key=${encodeURIComponent(apiKey)}`
+          : `/api/downloads/${dl.id}/file`;
         actionsHtml = `
-          <button onclick="downloadFile(${dl.id})">Save</button>
+          <button onclick="window.open('${fileUrl}', '_blank')">Save</button>
           <button class="danger" onclick="deleteDl(${dl.id})">Delete</button>`;
       } else if (dl.status === "failed") {
-        actionsHtml = `<button class="danger" onclick="deleteDl(${dl.id})">Remove</button>`;
+        actionsHtml = `
+          <button onclick="retryDl(${dl.id})">Retry</button>
+          <button class="danger" onclick="deleteDl(${dl.id})">Remove</button>`;
       } else {
         actionsHtml = `<button class="danger" onclick="deleteDl(${dl.id})">Cancel</button>`;
       }
@@ -235,7 +257,7 @@ function renderDownloads(downloads) {
             ${progressHtml}
             ${dl.error ? `<div class="error-msg">${escapeHtml(dl.error)}</div>` : ""}
           </div>
-          <span class="status ${statusClass}">${dl.status}</span>
+          <span class="status ${escapeHtml(statusClass)}">${escapeHtml(dl.status)}</span>
           <div class="dl-actions">${actionsHtml}</div>
         </div>`;
     })
@@ -243,13 +265,24 @@ function renderDownloads(downloads) {
 }
 
 // --- Actions ---
-function downloadFile(id) {
-  window.open(`/api/downloads/${id}/file`, "_blank");
+async function retryDl(id) {
+  try {
+    const resp = await api("POST", `/api/downloads/${id}/retry`);
+    if (!resp.ok) {
+      const data = await resp.json();
+      alert("Retry failed: " + (data.detail || "Unknown error"));
+      return;
+    }
+    refreshDownloads();
+    startPolling();
+  } catch (err) {
+    console.error("Retry failed:", err);
+  }
 }
 
 async function deleteDl(id) {
   try {
-    await fetch(`/api/downloads/${id}`, { method: "DELETE" });
+    await api("DELETE", `/api/downloads/${id}`);
     refreshDownloads();
   } catch (err) {
     console.error("Delete failed:", err);
@@ -291,8 +324,9 @@ function pad(n) {
 }
 
 function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
   const div = document.createElement("div");
-  div.textContent = str;
+  div.textContent = String(str);
   return div.innerHTML;
 }
 

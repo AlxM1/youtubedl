@@ -1,4 +1,5 @@
 import os
+import secrets
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -9,6 +10,16 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
 COOKIES_FILE = os.environ.get("COOKIES_FILE", "")
+
+# Authentication: set API_KEY to require auth, or leave empty to disable (local-only use).
+# Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+API_KEY = os.environ.get("API_KEY", "")
+
+# Rate limiting: max format-extract requests per minute per IP
+EXTRACT_RATE_LIMIT = int(os.environ.get("EXTRACT_RATE_LIMIT", "10"))
+
+# Minimum free disk space (bytes) before refusing new downloads. Default 500MB.
+MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_MB", "500")) * 1024 * 1024
 
 SUPPORTED_PLATFORMS = {
     "youtube": ["youtube.com", "youtu.be", "youtube-nocookie.com"],

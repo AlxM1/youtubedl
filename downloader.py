@@ -1,5 +1,5 @@
 import asyncio
-import re
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -9,6 +9,8 @@ from sqlalchemy import select
 
 import config
 from database import Download, async_session
+
+logger = logging.getLogger("downloader")
 
 # Active downloads: download_id -> task
 _active: dict[int, asyncio.Task] = {}
@@ -44,9 +46,9 @@ async def extract_formats(url: str) -> dict:
     }
 
     loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(None, _extract_info, url, opts)
+    info, error = await loop.run_in_executor(None, _extract_info, url, opts)
     if not info:
-        return {"error": "Could not extract video information"}
+        return {"error": error or "Could not extract video information"}
 
     platform = detect_platform(url)
     formats = _parse_formats(info.get("formats", []))
@@ -62,12 +64,20 @@ async def extract_formats(url: str) -> dict:
     }
 
 
-def _extract_info(url: str, opts: dict) -> dict | None:
+def _extract_info(url: str, opts: dict) -> tuple[dict | None, str | None]:
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception:
-        return None
+            return ydl.extract_info(url, download=False), None
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e)
+        # Strip the "ERROR: " prefix yt-dlp adds
+        if msg.startswith("ERROR: "):
+            msg = msg[7:]
+        logger.warning("Extract failed for %s: %s", url, msg)
+        return None, msg
+    except Exception as e:
+        logger.exception("Unexpected error extracting %s", url)
+        return None, f"Unexpected error: {e}"
 
 
 def _parse_formats(raw_formats: list[dict]) -> list[dict]:
@@ -156,6 +166,26 @@ async def start_download(url: str, format_id: str, format_note: str = "") -> Dow
     return dl
 
 
+async def retry_download(dl_id: int) -> Download | None:
+    """Retry a failed download by resetting its status and re-running."""
+    async with async_session() as session:
+        dl = await session.get(Download, dl_id)
+        if not dl or dl.status != "failed":
+            return None
+        dl.status = "pending"
+        dl.error = ""
+        dl.progress = 0
+        await session.commit()
+        await session.refresh(dl)
+
+        url = dl.url
+        format_id = dl.format_id
+
+    task = asyncio.create_task(_run_download(dl_id, url, format_id))
+    _active[dl_id] = task
+    return dl
+
+
 async def _run_download(dl_id: int, url: str, format_id: str):
     """Execute the actual download with progress tracking."""
     await _update_status(dl_id, "downloading")
@@ -178,12 +208,20 @@ async def _run_download(dl_id: int, url: str, format_id: str):
                 dl.progress = 100
                 dl.completed_at = datetime.now(timezone.utc)
                 await session.commit()
+
+            logger.info("Download completed: id=%d file=%s size=%d", dl_id, p.name, filesize)
         except Exception as e:
+            error_msg = str(e)
+            if error_msg.startswith("ERROR: "):
+                error_msg = error_msg[7:]
+
             async with async_session() as session:
                 dl = await session.get(Download, dl_id)
                 dl.status = "failed"
-                dl.error = str(e)
+                dl.error = error_msg[:2000]
                 await session.commit()
+
+            logger.error("Download failed: id=%d error=%s", dl_id, error_msg)
         finally:
             _active.pop(dl_id, None)
             _progress.pop(dl_id, None)
@@ -222,13 +260,15 @@ def _download_sync(dl_id: int, url: str, format_id: str) -> str:
     opts = {
         **_base_ytdlp_opts(),
         "format": fmt,
-        "outtmpl": str(config.DOWNLOAD_DIR / "%(title)s [%(id)s].%(ext)s"),
+        "outtmpl": str(config.DOWNLOAD_DIR / "%(title).150s [%(id)s].%(ext)s"),
         "merge_output_format": "mp4",
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [],
+        "restrictfilenames": False,
+        "windowsfilenames": True,
     }
 
-    # Extract info first to populate the record
+    # Extract info first to populate the record, then download
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if info:
@@ -237,7 +277,7 @@ def _download_sync(dl_id: int, url: str, format_id: str) -> str:
 
     if final_filepath:
         return final_filepath
-    # Fallback: use the prepared filename
+    # Fallback: reconstruct the filename
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return ydl.prepare_filename(info)
@@ -256,7 +296,6 @@ def _update_info_sync(dl_id: int, info: dict):
                 dl.duration = info.get("duration", 0) or 0
                 await session.commit()
 
-    # Run in a new event loop since we're in a thread
     loop = _aio.new_event_loop()
     try:
         loop.run_until_complete(_do())
@@ -274,6 +313,12 @@ async def _update_status(dl_id: int, status: str):
 
 def get_progress(dl_id: int) -> dict:
     return _progress.get(dl_id, {})
+
+
+async def get_download_by_id(dl_id: int) -> Download | None:
+    """Fetch a single download by ID."""
+    async with async_session() as session:
+        return await session.get(Download, dl_id)
 
 
 async def get_all_downloads(limit: int = 50) -> list[Download]:
@@ -297,7 +342,10 @@ async def delete_download(dl_id: int) -> bool:
         if dl.filepath:
             p = Path(dl.filepath)
             if p.exists():
-                p.unlink()
+                try:
+                    p.unlink()
+                except OSError as e:
+                    logger.warning("Could not delete file %s: %s", p, e)
         await session.delete(dl)
         await session.commit()
         return True

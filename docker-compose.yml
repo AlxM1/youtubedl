@@ -9,6 +9,16 @@ services:
     environment:
       - DOWNLOAD_DIR=/app/downloads
       - MAX_CONCURRENT_DOWNLOADS=3
-      # Optional: path to cookies.txt inside container for auth-required content
+      # Required: set a strong API key to protect the instance
+      # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      # - API_KEY=your-secret-key-here
+      #
+      # Optional: rate limit on format extraction (per IP per minute)
+      # - EXTRACT_RATE_LIMIT=10
+      #
+      # Optional: minimum free disk space before refusing downloads (MB)
+      # - MIN_FREE_DISK_MB=500
+      #
+      # Optional: path to cookies.txt for auth-required content
       # - COOKIES_FILE=/app/cookies.txt
     restart: unless-stopped
