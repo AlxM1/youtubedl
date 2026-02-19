@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -8,9 +9,13 @@ import yt_dlp
 from sqlalchemy import select
 
 import config
+from cortex_client import get_cortex
 from database import Download, async_session
 
 logger = logging.getLogger("downloader")
+
+# Format ID validation pattern - alphanumeric, dashes, underscores, plus signs
+FORMAT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_+\-]+$')
 
 # Active downloads: download_id -> task
 _active: dict[int, asyncio.Task] = {}
@@ -32,6 +37,7 @@ def _base_ytdlp_opts() -> dict:
         "quiet": True,
         "no_warnings": True,
         "no_color": True,
+        "socket_timeout": 30,  # 30 second timeout for network operations
     }
     if config.COOKIES_FILE:
         opts["cookiefile"] = config.COOKIES_FILE
@@ -146,6 +152,10 @@ def _parse_formats(raw_formats: list[dict]) -> list[dict]:
 
 async def start_download(url: str, format_id: str, format_note: str = "") -> Download:
     """Create a download record and start the download in the background."""
+    # Validate format_id to prevent injection attacks
+    if format_id not in ("best", "best_audio") and not FORMAT_ID_PATTERN.match(format_id):
+        raise ValueError(f"Invalid format_id: {format_id}")
+    
     platform = detect_platform(url)
 
     async with async_session() as session:
@@ -153,13 +163,22 @@ async def start_download(url: str, format_id: str, format_note: str = "") -> Dow
             url=url,
             platform=platform,
             format_id=format_id,
-            format_note=format_note,
+            format_note=format_note[:200],  # Limit length
             status="pending",
         )
         session.add(dl)
         await session.commit()
         await session.refresh(dl)
         dl_id = dl.id
+
+    # Report task start to Cortex
+    cortex = get_cortex()
+    await cortex.task_started(
+        task_id=f"download_{dl_id}",
+        task_type="video_download",
+        description=f"Download {platform} video",
+        metadata={"url": url, "format_id": format_id, "download_id": dl_id}
+    )
 
     task = asyncio.create_task(_run_download(dl_id, url, format_id))
     _active[dl_id] = task
@@ -189,6 +208,8 @@ async def retry_download(dl_id: int) -> Download | None:
 async def _run_download(dl_id: int, url: str, format_id: str):
     """Execute the actual download with progress tracking."""
     await _update_status(dl_id, "downloading")
+    cortex = get_cortex()
+    task_id = f"download_{dl_id}"
 
     async with _semaphore:
         loop = asyncio.get_event_loop()
@@ -210,6 +231,15 @@ async def _run_download(dl_id: int, url: str, format_id: str):
                 await session.commit()
 
             logger.info("Download completed: id=%d file=%s size=%d", dl_id, p.name, filesize)
+            
+            # Report success to Cortex
+            await cortex.task_completed(
+                task_id=task_id,
+                result="success",
+                message=f"Downloaded {p.name} ({filesize} bytes)",
+                metadata={"filename": p.name, "filesize": filesize, "download_id": dl_id}
+            )
+            
         except Exception as e:
             error_msg = str(e)
             if error_msg.startswith("ERROR: "):
@@ -222,6 +252,14 @@ async def _run_download(dl_id: int, url: str, format_id: str):
                 await session.commit()
 
             logger.error("Download failed: id=%d error=%s", dl_id, error_msg)
+            
+            # Report failure to Cortex
+            await cortex.task_failed(
+                task_id=task_id,
+                error=error_msg[:500],
+                metadata={"download_id": dl_id, "url": url}
+            )
+            
         finally:
             _active.pop(dl_id, None)
             _progress.pop(dl_id, None)
@@ -230,9 +268,12 @@ async def _run_download(dl_id: int, url: str, format_id: str):
 def _download_sync(dl_id: int, url: str, format_id: str) -> str:
     """Blocking download — runs in a thread executor."""
     final_filepath = None
+    last_cortex_report = 0.0  # Timestamp of last Cortex progress report
+    cortex = get_cortex()
+    task_id = f"download_{dl_id}"
 
     def progress_hook(d):
-        nonlocal final_filepath
+        nonlocal final_filepath, last_cortex_report
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded = d.get("downloaded_bytes", 0)
@@ -244,6 +285,27 @@ def _download_sync(dl_id: int, url: str, format_id: str) -> str:
                 "downloaded": downloaded,
                 "total": total,
             }
+            
+            # Report to Cortex every 10% or 5 seconds, whichever comes first
+            import time
+            now = time.time()
+            if (pct >= last_cortex_report + 10) or (now - last_cortex_report >= 5):
+                # Run async cortex call in a new event loop (we're in a sync thread)
+                import asyncio as _aio
+                loop = _aio.new_event_loop()
+                try:
+                    loop.run_until_complete(
+                        cortex.task_progress(
+                            task_id=task_id,
+                            progress=round(pct, 1),
+                            message=f"{round(pct, 1)}% complete",
+                            metadata={"downloaded": downloaded, "total": total}
+                        )
+                    )
+                    last_cortex_report = pct
+                finally:
+                    loop.close()
+                    
         elif d["status"] == "finished":
             final_filepath = d.get("filename", "")
             _progress[dl_id] = {"progress": 100, "speed": 0, "eta": 0}

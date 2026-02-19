@@ -1,11 +1,12 @@
+import asyncio
 import logging
 import shutil
 import time
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+from cachetools import TTLCache
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +14,7 @@ from pydantic import BaseModel, field_validator
 
 import config
 import downloader
+from cortex_client import get_cortex, shutdown_cortex
 from database import Download, async_session, init_db
 
 # --- Logging ---
@@ -23,26 +25,37 @@ logging.basicConfig(
 logger = logging.getLogger("app")
 
 
-# --- Rate limiter (in-memory, per-IP) ---
-_rate_buckets: dict[str, list[float]] = defaultdict(list)
+# --- Rate limiter (TTL cache, per-IP) ---
+# Each IP gets a list of timestamps; cache entries expire after 60s
+_rate_cache: TTLCache = TTLCache(maxsize=10000, ttl=60)
 
 
-def _check_rate_limit(ip: str) -> bool:
+def _check_rate_limit(ip: str, limit: int = config.EXTRACT_RATE_LIMIT) -> bool:
     """Return True if the request is within the rate limit."""
     now = time.time()
     window = 60.0
-    bucket = _rate_buckets[ip]
-    # Prune old entries
-    _rate_buckets[ip] = [t for t in bucket if now - t < window]
-    if len(_rate_buckets[ip]) >= config.EXTRACT_RATE_LIMIT:
+    
+    if ip not in _rate_cache:
+        _rate_cache[ip] = []
+    
+    bucket = _rate_cache[ip]
+    # Prune old entries within the current bucket
+    bucket = [t for t in bucket if now - t < window]
+    _rate_cache[ip] = bucket
+    
+    if len(bucket) >= limit:
         return False
-    _rate_buckets[ip].append(now)
+    
+    bucket.append(now)
+    _rate_cache[ip] = bucket
     return True
 
 
 # --- Startup / Shutdown ---
 async def _recover_stale_downloads():
-    """Mark any downloads stuck in 'pending' or 'downloading' as failed on startup."""
+    """Mark any downloads stuck in 'pending' or 'downloading' as failed on startup.
+    Also clean up partial files to free disk space.
+    """
     from sqlalchemy import select, or_
 
     async with async_session() as session:
@@ -56,6 +69,17 @@ async def _recover_stale_downloads():
             dl.status = "failed"
             dl.error = "Server restarted while download was in progress"
             logger.warning("Recovered stale download id=%d url=%s", dl.id, dl.url)
+            
+            # Clean up partial files
+            if dl.filepath:
+                p = Path(dl.filepath)
+                if p.exists():
+                    try:
+                        p.unlink()
+                        logger.info("Deleted partial file: %s", p)
+                    except OSError as e:
+                        logger.warning("Could not delete partial file %s: %s", p, e)
+        
         if stale:
             await session.commit()
             logger.info("Recovered %d stale downloads", len(stale))
@@ -66,11 +90,57 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _recover_stale_downloads()
     logger.info("Server started on %s:%s", config.HOST, config.PORT)
+    
+    # Report startup to Cortex
+    cortex = get_cortex()
+    await cortex.health_check(status="ok", details={"event": "startup"})
+    
     yield
+    
     logger.info("Server shutting down")
+    # Report shutdown to Cortex
+    await cortex.health_check(status="shutting_down", details={"event": "shutdown"})
+    await shutdown_cortex()
 
 
 app = FastAPI(title="Video Downloader", lifespan=lifespan)
+
+
+# --- Security headers middleware ---
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    
+    # Content Security Policy - restrict inline scripts and styles
+    # Note: Relaxed for PWA functionality, can be tightened further
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; "
+        "upgrade-insecure-requests;"
+    )
+    
+    # Prevent MIME type sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    
+    # XSS protection (legacy, but doesn't hurt)
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    
+    # Referrer policy
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    return response
 
 
 # --- Auth middleware ---
@@ -82,8 +152,17 @@ async def auth_middleware(request: Request, call_next):
     if not config.API_KEY or path in public_paths or path.startswith("/static"):
         return await call_next(request)
 
-    # Check header or query param
-    key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    # Check header first (preferred), fall back to query param (deprecated)
+    key = request.headers.get("X-API-Key")
+    if not key:
+        key = request.query_params.get("api_key")
+        if key:
+            # Log deprecation warning for query param usage
+            logger.warning(
+                "API key via query param is deprecated (from %s). Use X-API-Key header.",
+                request.client.host if request.client else "unknown"
+            )
+    
     if key != config.API_KEY:
         return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
 
@@ -158,6 +237,11 @@ async def extract_formats(req: ExtractRequest, request: Request):
 @app.post("/api/download")
 async def start_download(req: DownloadRequest, request: Request):
     """Start downloading a video with the selected format."""
+    # Rate limit downloads too (more lenient than extract)
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(f"download:{client_ip}", limit=20):
+        raise HTTPException(429, "Too many downloads. Try again in a minute.")
+    
     # Check disk space
     disk = shutil.disk_usage(config.DOWNLOAD_DIR)
     if disk.free < config.MIN_FREE_DISK_BYTES:
@@ -166,7 +250,7 @@ async def start_download(req: DownloadRequest, request: Request):
             507, f"Insufficient disk space ({free_mb}MB free). Clear old downloads first."
         )
 
-    logger.info("Starting download: %s [format=%s]", req.url, req.format_id)
+    logger.info("Starting download: %s [format=%s] (from %s)", req.url, req.format_id, client_ip)
     dl = await downloader.start_download(
         url=req.url,
         format_id=req.format_id,
@@ -259,12 +343,18 @@ async def serve_file(dl_id: int):
 async def health_check():
     """Health check for monitoring and Docker HEALTHCHECK."""
     disk = shutil.disk_usage(config.DOWNLOAD_DIR)
-    return {
+    health_data = {
         "status": "ok",
         "disk_free_mb": disk.free // (1024 * 1024),
         "disk_total_mb": disk.total // (1024 * 1024),
         "active_downloads": len(downloader._active),
     }
+    
+    # Report health to Cortex (fire and forget, don't block)
+    cortex = get_cortex()
+    asyncio.create_task(cortex.health_check(status="ok", details=health_data))
+    
+    return health_data
 
 
 # --- Serve frontend ---

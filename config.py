@@ -20,6 +20,10 @@ EXTRACT_RATE_LIMIT = int(os.environ.get("EXTRACT_RATE_LIMIT", "10"))
 # Minimum free disk space (bytes) before refusing new downloads. Default 500MB.
 MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_MB", "500")) * 1024 * 1024
 
+# Cortex integration: task reporting endpoint
+CORTEX_URL = os.environ.get("CORTEX_URL", "http://cortex:3011")
+CORTEX_TIMEOUT = float(os.environ.get("CORTEX_TIMEOUT", "5.0"))
+
 SUPPORTED_PLATFORMS = {
     "youtube": ["youtube.com", "youtu.be", "youtube-nocookie.com"],
     "twitter": ["twitter.com", "x.com"],

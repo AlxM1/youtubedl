@@ -57,6 +57,8 @@ All settings via environment variables:
 | `MIN_FREE_DISK_MB` | `500` | Minimum free disk space (MB) before refusing downloads |
 | `COOKIES_FILE` | (empty) | Path to `cookies.txt` for authenticated content |
 | `DATABASE_URL` | `sqlite+aiosqlite:///data.db` | Database connection string |
+| `CORTEX_URL` | `http://cortex:3011` | Cortex task reporting endpoint (auto-disabled if unreachable) |
+| `CORTEX_TIMEOUT` | `5` | Cortex request timeout in seconds |
 
 ### Authentication
 
@@ -80,11 +82,30 @@ COOKIES_FILE=./cookies.txt python app.py
 
 - **API key authentication** — optional but strongly recommended for any non-localhost deployment
 - **URL validation** — only HTTP/HTTPS URLs accepted; local/private IPs blocked (SSRF protection)
-- **Rate limiting** — per-IP rate limiting on the expensive format-extraction endpoint
+- **Rate limiting** — per-IP rate limiting on format extraction (10/min) and downloads (20/min)
 - **Path traversal protection** — file downloads validated against the download directory
+- **Format ID validation** — prevents command injection via format string attacks
+- **Socket timeouts** — 30-second timeout prevents hanging on slow/malicious sites
+- **Security headers** — CSP, X-Frame-Options, X-Content-Type-Options, etc.
 - **Non-root container** — Docker runs as `appuser`, not root
 - **Disk space guard** — refuses new downloads when disk is nearly full
-- **Stale recovery** — downloads stuck mid-progress are marked as failed on server restart
+- **Stale recovery** — downloads stuck mid-progress are marked as failed and partial files cleaned up on server restart
+- **Memory-safe rate limiting** — uses TTL cache to prevent memory leaks
+
+## Cortex Integration
+
+The service reports task activity to Cortex (if available) for centralized monitoring:
+
+- **Task lifecycle** — start, progress, completion, failure events
+- **Health checks** — periodic health status reports
+- **Download progress** — real-time progress updates (throttled to avoid spam)
+
+Cortex integration is **non-blocking** and auto-disables if the endpoint is unreachable. Configure via:
+
+```bash
+CORTEX_URL=http://cortex:3011
+CORTEX_TIMEOUT=5
+```
 
 ## Architecture
 
@@ -93,6 +114,7 @@ app.py              — FastAPI application, API endpoints, auth, rate limiting,
 downloader.py       — yt-dlp integration, format extraction, download manager, retry logic
 database.py         — SQLAlchemy async models and session management
 config.py           — Configuration from environment variables
+cortex_client.py    — Cortex task reporting integration
 static/
   index.html        — Single-page web UI
   style.css         — Dark theme styles
