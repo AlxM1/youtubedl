@@ -22,6 +22,7 @@ MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_MB", "500")) * 1024 * 10
 
 # Cortex integration: task reporting endpoint
 CORTEX_URL = os.environ.get("CORTEX_URL", "http://cortex:3011")
+CORTEX_API_KEY = os.environ.get("CORTEX_API_KEY")
 CORTEX_TIMEOUT = float(os.environ.get("CORTEX_TIMEOUT", "5.0"))
 
 SUPPORTED_PLATFORMS = {

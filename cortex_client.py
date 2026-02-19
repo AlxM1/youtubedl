@@ -14,7 +14,7 @@ SERVICE_NAME = "youtubedl"
 class CortexClient:
     """Simple async client for reporting task activity to Cortex."""
 
-    def __init__(self, base_url: str | None = None, timeout: float | None = None):
+    def __init__(self, base_url: str | None = None, timeout: float | None = None, api_key: str | None = None):
         # Import config here to avoid circular imports
         import config
         
@@ -22,9 +22,18 @@ class CortexClient:
             base_url = config.CORTEX_URL
         if timeout is None:
             timeout = config.CORTEX_TIMEOUT
+        if api_key is None:
+            api_key = config.CORTEX_API_KEY
+        
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self.api_key = api_key
+        
+        headers = {}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        
+        self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
         self._enabled = True
 
     async def close(self):
