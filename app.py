@@ -295,10 +295,13 @@ async def list_downloads():
 @app.get("/api/downloads/{dl_id}/progress")
 async def get_progress(dl_id: int):
     """Get live progress for an active download."""
+    dl = await downloader.get_download_by_id(dl_id)
+    if not dl:
+        raise HTTPException(404, "Download not found")
     live = downloader.get_progress(dl_id)
     if live:
         return live
-    return {"progress": 0, "speed": 0, "eta": 0}
+    return {"progress": dl.progress, "speed": 0, "eta": 0}
 
 
 @app.post("/api/downloads/{dl_id}/retry")
